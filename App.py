@@ -14,7 +14,7 @@ from fpdf import FPDF
 from docx import Document as DocxWriter
 
 # LangChain + embeddings + vectorstore
-from langchain.text_splitter import CharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
 
@@ -85,7 +85,7 @@ def chunk_documents_from_uploads(uploaded_files) -> Tuple[List[str], List[dict]]
             except Exception:
                 continue
     # Chunk documents into smaller passages for RAG
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = []
     chunk_metadatas = []
     for txt, meta in zip(texts, metadatas):
