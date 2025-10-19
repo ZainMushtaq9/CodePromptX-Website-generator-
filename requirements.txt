@@ -3,6 +3,7 @@ groq
 langchain
 langchain-core
 langchain-community
+langchain-text-splitters
 openai
 python-docx
 fpdf
