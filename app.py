@@ -6,59 +6,34 @@ from pdf2image import convert_from_bytes
 from PyPDF2 import PdfReader
 from io import BytesIO
 from PIL import Image
-import tempfile
-from dotenv import load_dotenv
-import os
+import shutil
 
-# Load environment variables
-load_dotenv()
-
-st.set_page_config(page_title="📘 OCR Text Extractor (Blurry PDF Support)", layout="wide")
+st.set_page_config(page_title="🧠 AI Text Extractor (OCR + Smart Fallbacks)", layout="wide")
 st.title("🧠 AI Text Extractor for Blurry Scanned PDFs")
-st.caption("Handles both image-based and text-based PDFs — includes preprocessing for blur & low-quality scans.")
+st.caption("Handles both image-based and text-based PDFs — with smart fallbacks for missing system libraries.")
 
-# --- IMAGE PREPROCESSING FOR BLUR / LOW QUALITY ---
+
+# --- UTILITY: Check system dependencies ---
+def is_tool_installed(tool_name: str):
+    return shutil.which(tool_name) is not None
+
+
+# --- IMAGE PREPROCESSING ---
 def preprocess_image(image: Image.Image):
-    # Convert to OpenCV format
     img = np.array(image.convert("RGB"))
     img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-
-    # Denoise and sharpen
-    img = cv2.fastNlMeansDenoising(img, h=30)
-    img = cv2.GaussianBlur(img, (1, 1), 0)
+    img = cv2.fastNlMeansDenoising(img, h=25)
     img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-
-    # Contrast enhancement (CLAHE)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     img = clahe.apply(img)
-
     return img
 
 
-# --- EXTRACT TEXT FROM IMAGE ---
+# --- OCR EXTRACTION ---
 def extract_text_from_image(image: Image.Image):
     processed = preprocess_image(image)
     text = pytesseract.image_to_string(processed, lang="eng")
     return text
-
-
-# --- EXTRACT TEXT FROM IMAGE-BASED PDF ---
-@st.cache_data
-def extract_text_from_image_pdf(file_bytes):
-    try:
-        pages = convert_from_bytes(file_bytes)
-        all_text = ""
-        for i, page in enumerate(pages):
-            st.info(f"🖼️ Processing page {i + 1}/{len(pages)} with OCR...")
-            text = extract_text_from_image(page)
-            all_text += text + "\n"
-        return all_text.strip()
-    except pytesseract.pytesseract.TesseractNotFoundError:
-        st.error("❌ Tesseract OCR not installed. Please install it locally using: `apt-get install tesseract-ocr -y`.")
-        return ""
-    except Exception as e:
-        st.error(f"⚠️ OCR error: {e}")
-        return ""
 
 
 # --- EXTRACT TEXT FROM TEXT-BASED PDF ---
@@ -73,15 +48,42 @@ def extract_text_from_text_pdf(file_bytes):
                 if page_text:
                     text += page_text + "\n"
     except Exception as e:
-        st.error(f"⚠️ PDF text extraction failed: {e}")
+        st.warning(f"⚠️ Text-based PDF extraction failed: {e}")
     return text.strip()
 
 
-# --- COMBINED EXTRACTION LOGIC ---
+# --- EXTRACT TEXT FROM IMAGE-BASED PDF ---
+@st.cache_data
+def extract_text_from_image_pdf(file_bytes):
+    if not is_tool_installed("pdftoppm"):
+        st.error("❌ Poppler (pdftoppm) is not installed. OCR cannot run. Please install it locally.")
+        st.info("👉 On Linux: `sudo apt-get install poppler-utils -y`\n👉 On Windows: install from https://blog.alivate.com.au/poppler-windows/")
+        return ""
+
+    if not is_tool_installed("tesseract"):
+        st.error("❌ Tesseract OCR not installed. Please install it locally.")
+        st.info("👉 On Windows: install from https://github.com/UB-Mannheim/tesseract/wiki\n👉 On Linux: `sudo apt-get install tesseract-ocr -y`")
+        return ""
+
+    try:
+        pages = convert_from_bytes(file_bytes)
+        all_text = ""
+        for i, page in enumerate(pages):
+            st.info(f"🖼️ Processing page {i + 1}/{len(pages)} via OCR...")
+            text = extract_text_from_image(page)
+            all_text += text + "\n"
+        return all_text.strip()
+
+    except Exception as e:
+        st.error(f"⚠️ OCR extraction error: {e}")
+        return ""
+
+
+# --- MAIN EXTRACTION LOGIC ---
 def extract_text_from_file(file_bytes):
     text = extract_text_from_text_pdf(file_bytes)
     if not text:
-        st.warning("⚠️ No readable text found — switching to OCR mode (for image-based PDF).")
+        st.warning("⚠️ No readable text found — switching to OCR mode (for scanned PDFs).")
         text = extract_text_from_image_pdf(file_bytes)
     return text
 
@@ -98,8 +100,4 @@ if uploaded_file:
         st.success("✅ Text extracted successfully!")
         st.text_area("📜 Extracted Text", text, height=400)
     else:
-        st.error("❌ No valid text extracted. Try a clearer scan or ensure Tesseract is installed.")
-
-
-st.markdown("---")
-st.caption("🧩 Tip: For better OCR accuracy, upload scans with readable fonts and adequate lighting.")
+        st.error("❌ No valid text extracted. Try a clearer scan or ensure Poppler & Tesseract are installed.")
