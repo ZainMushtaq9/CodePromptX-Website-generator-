@@ -3,3 +3,7 @@ groq
 PyPDF2
 python-docx
 fpdf
+langchain
+sentence-transformers
+faiss-cpu
+python-dotenv
