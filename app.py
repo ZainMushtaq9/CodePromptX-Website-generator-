@@ -14,9 +14,9 @@ from fpdf import FPDF
 from docx import Document as DocxWriter
 
 # LangChain + embeddings + vectorstore
-from langchain.text_splitters import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 
 # ---------------------- Utilities ----------------------
 def sanitize_for_latin(text: str) -> str:
