@@ -1,18 +1,8 @@
-# requirements.txt
 streamlit
-groq
 PyPDF2
-python-docx
-fpdf
-Pillow
-pymupdf
-langchain
-langchain-community
-langchain-text-splitters
-langchain-huggingface
-langchain_community
-chromadb
-sentence-transformers
+pdf2image
 pytesseract
-surya-ocr
+opencv-python-headless
+numpy
+Pillow
 python-dotenv
