@@ -14,7 +14,7 @@ from fpdf import FPDF
 from docx import Document as DocxWriter
 
 # LangChain + embeddings + vectorstore
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.text_splitters import RecursiveCharacterTextSplitter
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
 
