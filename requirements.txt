@@ -4,9 +4,11 @@ langchain
 langchain-core
 langchain-community
 langchain-text-splitters
+langchain-huggingface
 openai
 python-docx
 fpdf
 PyPDF2
 pdfplumber
 tqdm
+sentence-transformers
