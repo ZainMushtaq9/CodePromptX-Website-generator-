@@ -5,10 +5,10 @@ langchain-core
 langchain-community
 langchain-text-splitters
 langchain-huggingface
+chromadb
 openai
 python-docx
 fpdf
 PyPDF2
-pdfplumber
 tqdm
 sentence-transformers
