@@ -1,9 +1,8 @@
 import os
-import io
 import re
 import tempfile
 import unicodedata
-from typing import List, Dict, Tuple
+from typing import List, Tuple
 
 import streamlit as st
 from groq import Groq
@@ -11,17 +10,20 @@ from PyPDF2 import PdfReader
 from docx import Document as DocxReader
 from fpdf import FPDF
 from docx import Document as DocxWriter
-from PIL import Image
-import pytesseract
 
-# LangChain + embeddings + vectorstore (free + cloud-safe)
+# Free LangChain components
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
+# OCR
+import pytesseract
+from pdf2image import convert_from_path
+
+
 # ---------------------- Utilities ----------------------
 def sanitize_for_latin(text: str) -> str:
-    """Ensure text safe for FPDF."""
+    """Remove or replace characters that FPDF can't handle (latin-1 safe)."""
     if not isinstance(text, str):
         text = str(text)
     text = unicodedata.normalize("NFKD", text)
@@ -31,47 +33,41 @@ def sanitize_for_latin(text: str) -> str:
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
-    encoded = text.encode("latin-1", errors="replace")
-    return encoded.decode("latin-1")
+    return text.encode("latin-1", errors="replace").decode("latin-1")
 
-# ---------------------- Document Processing ----------------------
+
+# ---------------------- PDF & DOC Extraction ----------------------
 def extract_text_from_pdf(path: str) -> List[str]:
     """
     Extract text from both text-based and image-based PDFs.
-    For image pages, use pytesseract OCR.
-    Returns list of per-page text.
+    For image pages, uses OCR with pytesseract.
     """
     texts = []
     try:
         reader = PdfReader(path)
-        for i, page in enumerate(reader.pages):
+        for i, page in enumerate(reader.pages, start=1):
             txt = page.extract_text()
             if txt and len(txt.strip()) > 30:
-                texts.append(txt)
+                texts.append(txt.strip())
             else:
-                # OCR fallback for scanned page
-                images = page.images
-                if not images:
-                    # convert page to image via pdf2image (optional lightweight fallback)
-                    from pdf2image import convert_from_path
-                    temp_images = convert_from_path(path, first_page=i + 1, last_page=i + 1)
-                    for im in temp_images:
-                        ocr_text = pytesseract.image_to_string(im)
-                        texts.append(ocr_text)
-                else:
+                # Fallback: OCR
+                try:
+                    images = convert_from_path(path, first_page=i, last_page=i)
                     for im in images:
-                        img_bytes = io.BytesIO(im.data)
-                        image = Image.open(img_bytes)
-                        ocr_text = pytesseract.image_to_string(image)
-                        texts.append(ocr_text)
+                        ocr_txt = pytesseract.image_to_string(im)
+                        if len(ocr_txt.strip()) > 30:
+                            texts.append(ocr_txt.strip())
+                except Exception:
+                    continue
     except Exception:
         return []
-    return texts
+    return [t for t in texts if len(t.strip()) > 30]
 
 
 def chunk_documents_from_uploads(uploaded_files) -> Tuple[List[str], List[dict]]:
-    """Extract and chunk text from PDF/DOCX (OCR-aware)."""
+    """Extract and chunk text from PDF/DOCX uploads (OCR aware)."""
     texts, metadatas = [], []
+
     for file in uploaded_files:
         name = file.name
         temp_path = os.path.join(tempfile.gettempdir(), name)
@@ -80,48 +76,98 @@ def chunk_documents_from_uploads(uploaded_files) -> Tuple[List[str], List[dict]]
 
         if name.lower().endswith(".pdf"):
             pdf_texts = extract_text_from_pdf(temp_path)
+            if not pdf_texts:
+                st.warning(f"⚠️ No readable text found in {name}. It might be blank or low-quality scan.")
+                continue
             for i, t in enumerate(pdf_texts):
                 texts.append(t)
-                metadatas.append({"source": name, "page": i + 1})
+                metadatas.append({"source": name, "page": i})
+
         elif name.lower().endswith(".docx"):
-            doc = DocxReader(temp_path)
-            full = "\n".join([p.text for p in doc.paragraphs])
-            texts.append(full)
-            metadatas.append({"source": name, "page": 0})
-        else:
-            continue
+            try:
+                doc = DocxReader(temp_path)
+                full_text = "\n".join([p.text for p in doc.paragraphs])
+                if len(full_text.strip()) < 30:
+                    st.warning(f"⚠️ {name} seems empty or unreadable.")
+                    continue
+                texts.append(full_text)
+                metadatas.append({"source": name, "page": 0})
+            except Exception:
+                st.warning(f"❌ Error reading {name}. Skipping.")
+                continue
+
+    if not texts:
+        st.error("❌ No valid text extracted from uploads.")
+        return [], []
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks, chunk_metas = [], []
+    chunks, metas = [], []
     for t, m in zip(texts, metadatas):
         for i, part in enumerate(splitter.split_text(t)):
-            chunks.append(part)
-            chunk_metas.append({**m, "chunk": i})
-    return chunks, chunk_metas
+            if len(part.strip()) > 20:
+                chunks.append(part)
+                metas.append({**m, "chunk": i})
 
-# ---------------------- RAG ----------------------
+    return chunks, metas
+
+
+# ---------------------- RAG Index ----------------------
 def build_rag_index(chunks: List[str], metadatas: List[dict]):
+    """Build Chroma vector index safely (no empty embeddings)."""
+    if not chunks:
+        raise ValueError("No text chunks to index.")
+    chunks = [c for c in chunks if len(c.strip()) > 0]
+
     embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vectordb = Chroma.from_texts(chunks, embedding=embedder, metadatas=metadatas)
+
+    try:
+        vectordb = Chroma.from_texts(chunks, embedding=embedder, metadatas=metadatas)
+    except ValueError as e:
+        if "Expected Embeddings" in str(e):
+            raise ValueError("No valid text found for embeddings. Try re-uploading a clearer document.")
+        else:
+            raise e
+
     return vectordb
 
-def retrieve_context(vectordb, keywords: str = None, top_k: int = 6) -> str:
-    docs = vectordb.similarity_search(keywords or "", k=top_k)
-    return "\n\n".join([d.page_content for d in docs])
 
-# ---------------------- Groq Question Generator ----------------------
+def retrieve_context(vectorstore, keywords=None, by_pages=None, top_k=6):
+    """Retrieve relevant chunks by keywords or page range."""
+    results = []
+    if by_pages:
+        s, e = by_pages
+        docs = vectorstore.similarity_search("", k=top_k * 5)
+        for d in docs:
+            p = d.metadata.get("page", 0)
+            if s <= p <= e:
+                results.append(d.page_content)
+            if len(results) >= top_k:
+                break
+    elif keywords:
+        docs = vectorstore.similarity_search(keywords, k=top_k)
+        results = [d.page_content for d in docs]
+    else:
+        docs = vectorstore.similarity_search("", k=top_k)
+        results = [d.page_content for d in docs]
+    return "\n\n".join(results)
+
+
+# ---------------------- Groq Model ----------------------
 def generate_question_paper(content: str, specs: dict, with_answers: bool) -> str:
+    """Use Groq to generate question paper."""
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     system_prompt = (
-        "You are an expert teacher assistant. Generate a question paper "
-        "with MCQs, Short, and Long answers. Include 'Answers' section if requested."
+        "You are an expert teacher. Generate a structured question paper from the study material below. "
+        "Include three sections: MCQs, Short Answer, Long Answer. "
+        "If with_answers=True, include an answer key at the end."
     )
+    content = content[:18000]
     user_prompt = (
-        f"Context:\n{content[:18000]}\n\n"
-        f"Specs:\nTotal: {specs['total']}, MCQ: {specs['mcq']}, Short: {specs['short']}, Long: {specs['long']}, "
-        f"With Answers: {with_answers}\n"
-        "Generate the question paper accordingly."
+        f"Study material:\n{content}\n\n"
+        f"Specs:\nTotal: {specs['total']} | MCQ: {specs['mcq']} | Short: {specs['short']} | Long: {specs['long']} | "
+        f"Include Answers: {with_answers}"
     )
+
     try:
         resp = client.chat.completions.create(
             model="groq/compound-mini",
@@ -129,68 +175,102 @@ def generate_question_paper(content: str, specs: dict, with_answers: bool) -> st
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.3,
+            temperature=0.2,
             max_tokens=4000,
         )
         return resp.choices[0].message.content
     except Exception as e:
-        return f"Error generating question paper: {e}"
+        return f"Error generating paper: {e}"
 
-# ---------------------- Save Outputs ----------------------
+
+# ---------------------- Save Utility ----------------------
 def save_question_paper(text: str, filename: str, with_answers: bool):
     os.makedirs("outputs", exist_ok=True)
+    content = re.sub(r"\r\n", "\n", text).strip()
     if not with_answers:
-        text = re.split(r"(?i)\nanswers?\b", text)[0]
+        content = re.split(r"(?i)\nanswers?\b", content)[0]
 
     # DOCX
+    docx_path = os.path.join("outputs", f"{filename}.docx")
     doc = DocxWriter()
     doc.add_heading(filename.title(), 0)
-    for para in text.split("\n"):
+    for para in content.split("\n"):
         doc.add_paragraph(para)
-    doc.save(f"outputs/{filename}.docx")
+    doc.save(docx_path)
 
     # PDF
+    pdf_path = os.path.join("outputs", f"{filename}.pdf")
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=11)
-    for line in text.split("\n"):
+    for line in content.split("\n"):
         pdf.multi_cell(0, 7, sanitize_for_latin(line))
-    pdf.output(f"outputs/{filename}.pdf")
+    pdf.output(pdf_path)
+
+    return docx_path, pdf_path
+
 
 # ---------------------- Streamlit UI ----------------------
-st.set_page_config(page_title="AI Question Paper Generator", page_icon="🧠")
+st.set_page_config(page_title="🧠 AI Question Paper Generator (OCR + RAG)", page_icon="🧠")
 st.title("🧠 AI Question Paper Generator (OCR + RAG)")
-st.caption("Supports image-based and text-based PDFs • Free stack")
+st.caption("Supports both text & image-based PDFs • 100% free stack")
 
-uploaded = st.file_uploader("📚 Upload PDF/DOCX notes", type=["pdf", "docx"], accept_multiple_files=True)
-if uploaded and st.button("🔎 Build Knowledge Base"):
-    with st.spinner("Extracting & indexing text..."):
+uploaded = st.file_uploader("📚 Upload PDF or DOCX notes", type=["pdf", "docx"], accept_multiple_files=True)
+
+if uploaded and st.button("🔎 Build Knowledge Index"):
+    with st.spinner("Extracting & indexing... please wait."):
         chunks, metas = chunk_documents_from_uploads(uploaded)
-        vectordb = build_rag_index(chunks, metas)
-        st.session_state["vectordb"] = vectordb
-        st.success("✅ Knowledge base built successfully!")
+        if chunks:
+            try:
+                vectordb = build_rag_index(chunks, metas)
+                st.session_state["vectordb"] = vectordb
+                st.success(f"✅ Indexed {len(chunks)} chunks of text.")
+            except Exception as e:
+                st.error(f"❌ Index build error: {e}")
 
-if "vectordb" in st.session_state:
-    st.subheader("🧩 Generate Question Paper")
-    topic = st.text_input("Enter topic or keywords (optional):")
-    total_q = st.number_input("Total Questions", 1, 100, 20)
-    mcq_q = st.number_input("MCQs", 0, 100, 10)
-    short_q = st.number_input("Short Answers", 0, 100, 5)
-    long_q = st.number_input("Long Answers", 0, 100, 2)
-    with_answers = st.checkbox("Include Answers", True)
-    filename = st.text_input("File name", "question_paper")
+# Retrieval
+st.subheader("🎯 Choose your topic or pages")
+colA, colB = st.columns(2)
+with colA:
+    keywords = st.text_input("Search by keywords (e.g., Photosynthesis, Algebra, etc.)", "")
+with colB:
+    page_range = st.text_input("Or specify page range (e.g., 5-10)", "")
 
-    if st.button("🚀 Generate"):
-        with st.spinner("Generating paper..."):
-            context = retrieve_context(st.session_state["vectordb"], topic, top_k=6)
-            specs = {"total": total_q, "mcq": mcq_q, "short": short_q, "long": long_q}
-            result = generate_question_paper(context, specs, with_answers)
-            if "Error" in result:
-                st.error(result)
+top_k = st.slider("Context size (chunks)", 2, 10, 6)
+
+# Question Specs
+st.subheader("📄 Question Paper Settings")
+total = st.number_input("Total Questions", 1, 100, 20)
+mcq = st.number_input("MCQs", 0, 50, 10)
+short = st.number_input("Short Answer", 0, 20, 5)
+long = st.number_input("Long Answer", 0, 10, 2)
+with_answers = st.checkbox("Include Answers", True)
+filename = st.text_input("Output file name", "question_paper")
+
+if st.button("🚀 Generate Question Paper"):
+    if "vectordb" not in st.session_state:
+        st.warning("Please build the RAG index first.")
+    else:
+        vectordb = st.session_state["vectordb"]
+        pages_tuple = None
+        if page_range and re.match(r"^\d+\s*-\s*\d+$", page_range):
+            s, e = [int(x) for x in page_range.split("-")]
+            pages_tuple = (min(s, e), max(s, e))
+        with st.spinner("Generating question paper..."):
+            context = retrieve_context(vectordb, keywords=keywords, by_pages=pages_tuple, top_k=top_k)
+            if not context.strip():
+                st.error("❌ No relevant context found.")
             else:
-                save_question_paper(result, filename, with_answers)
-                st.success("✅ Generated successfully!")
-                with open(f"outputs/{filename}.pdf", "rb") as fpdf:
-                    st.download_button("📥 Download PDF", fpdf, file_name=f"{filename}.pdf")
-                with open(f"outputs/{filename}.docx", "rb") as fdocx:
-                    st.download_button("📥 Download DOCX", fdocx, file_name=f"{filename}.docx")
+                specs = {"total": total, "mcq": mcq, "short": short, "long": long}
+                result = generate_question_paper(context, specs, with_answers)
+                if result.startswith("Error"):
+                    st.error(result)
+                else:
+                    docx_path, pdf_path = save_question_paper(result, filename, with_answers)
+                    st.success("✅ Question paper generated!")
+                    with open(pdf_path, "rb") as f:
+                        st.download_button("📥 Download PDF", f, file_name=f"{filename}.pdf")
+                    with open(docx_path, "rb") as f:
+                        st.download_button("📥 Download DOCX", f, file_name=f"{filename}.docx")
+
+st.info("Workflow → 1️⃣ Upload notes → 2️⃣ Build index → 3️⃣ Choose topic/pages → 4️⃣ Generate paper")
