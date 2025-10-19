@@ -6,9 +6,10 @@ langchain-community
 langchain-text-splitters
 langchain-huggingface
 chromadb
-openai
 python-docx
 fpdf
 PyPDF2
-tqdm
+pytesseract
+Pillow
+pdf2image
 sentence-transformers
