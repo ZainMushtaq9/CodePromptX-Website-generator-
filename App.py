@@ -1,117 +1,99 @@
-import os
-import json
-import tempfile
-import zipfile
 import streamlit as st
 from groq import Groq
-from dotenv import load_dotenv
+import json
+import zipfile
+import io
 
-# Load environment variables
-load_dotenv()
-api_keys = os.getenv("GROQ_API_KEYS", "").split(",")
+# --- Streamlit Page Setup ---
+st.set_page_config(page_title="CodePromptX - WebApp Generator", page_icon="⚡")
+st.title("⚡ CodePromptX — Full WebApp Generator")
+st.caption("Free AI Project Builder — Powered by GroqCloud (Model: groq/compound-mini)")
 
-# Function to rotate through multiple API keys
-def create_client():
-    for key in api_keys:
-        try:
-            client = Groq(api_key=key.strip())
-            # test connection (light ping)
-            client.chat.completions.create(
-                model="groq/compound-mini",
-                messages=[{"role": "system", "content": "ping"}]
-            )
-            return client
-        except Exception:
-            continue
-    st.error("All API keys failed. Please check your keys.")
-    return None
+# --- Initialize Groq client ---
+client = Groq(api_key=st.secrets.get("GROQ_API_KEY", "YOUR_GROQ_API_KEY"))
 
-# Generate project structure and code using AI
-def generate_code_structure(language, framework, db=None):
-    client = create_client()
-    if not client:
-        return None
+# --- User Inputs ---
+st.subheader("🧠 Describe your project idea")
+project_goal = st.text_area("What do you want to build?", placeholder="e.g. A blog platform with React frontend and Flask backend")
 
-    prompt = f"""
-You are an expert full-stack developer.
-Generate a complete project structure for a {language} project using {framework}.
-- Include folders and files with starter code and README.
-- Follow best practices for {language}/{framework}.
-- Optional database: {db}.
-- Output ONLY in JSON format:
-{{
-  "folders": ["list of folders"],
-  "files": {{
-      "filename": "file content"
-  }},
-  "instructions": "how to run the project"
-}}
-"""
-    response = client.chat.completions.create(
-        model="groq/compound-mini",
-        messages=[
-            {"role": "system", "content": "You are a professional code generator AI."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-    return response.choices[0].message.content
+col1, col2, col3 = st.columns(3)
+with col1:
+    frontend = st.selectbox("Frontend", ["React", "Next.js", "Streamlit", "HTML/CSS/JS"])
+with col2:
+    backend = st.selectbox("Backend", ["Flask", "FastAPI", "Node.js", "Django", "None"])
+with col3:
+    database = st.selectbox("Database", ["MongoDB", "PostgreSQL", "MySQL", "SQLite", "None"])
 
-# Create zip file from JSON data
-def create_zip_from_json(json_data):
-    try:
-        data = json.loads(json_data)
-    except json.JSONDecodeError:
-        st.error("Failed to parse JSON from AI. Try again.")
-        return None
+# --- Generate Button ---
+if st.button("🚀 Generate My WebApp"):
+    if not project_goal.strip():
+        st.warning("Please describe your project idea first.")
+    else:
+        with st.spinner("⚙️ Generating your project... Please wait..."):
+            try:
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a professional full-stack project generator. "
+                            "Given a tech stack and purpose, generate a working directory structure "
+                            "with clear file contents and commands to run backend and frontend separately. "
+                            "Respond in valid JSON with keys: directories, files, run_instructions."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
+                        Project Goal: {project_goal}
+                        Frontend: {frontend}
+                        Backend: {backend}
+                        Database: {database}
+                        Return a JSON output with directory structure and code.
+                        """
+                    }
+                ]
 
-    tmp_dir = tempfile.mkdtemp()
-
-    # Create folders
-    for folder in data.get("folders", []):
-        os.makedirs(os.path.join(tmp_dir, folder), exist_ok=True)
-
-    # Create files
-    for fname, content in data.get("files", {}).items():
-        file_path = os.path.join(tmp_dir, fname)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-    # Create zip
-    zip_path = os.path.join(tempfile.gettempdir(), "project.zip")
-    with zipfile.ZipFile(zip_path, "w") as zipf:
-        for root, dirs, files in os.walk(tmp_dir):
-            for file in files:
-                zipf.write(
-                    os.path.join(root, file),
-                    arcname=os.path.relpath(os.path.join(root, file), tmp_dir)
+                response = client.chat.completions.create(
+                    model="groq/compound-mini",
+                    messages=messages,
+                    temperature=0.7,
                 )
-    return zip_path
 
-# ---------------- Streamlit UI ----------------
-st.set_page_config(page_title="AI Code Generator", page_icon="💻")
-st.title("💻 CodePromptX — AI Code Generator")
-st.caption("Generate full project structure with starter code using Groq (Free Model: compound-mini)")
+                output = response.choices[0].message.content
 
-# User selections
-language = st.selectbox("Programming Language", ["Python", "JavaScript", "Java", "Go", "C#"])
-framework = st.selectbox("Framework / Backend", ["Flask", "FastAPI", "Django", "React", "Node.js", "Spring Boot"])
-db = st.selectbox("Database (Optional)", ["None", "SQLite", "PostgreSQL", "MySQL", "MongoDB"])
+                # Try parsing the output as JSON
+                try:
+                    project_data = json.loads(output)
+                except json.JSONDecodeError:
+                    st.error("⚠️ AI output not in perfect JSON — showing raw text instead:")
+                    st.code(output, language="json")
+                    st.stop()
 
-# Generate button
-if st.button("🚀 Generate Project"):
-    with st.spinner("Generating project..."):
-        json_result = generate_code_structure(language, framework, db if db != "None" else None)
-        if json_result:
-            zip_file = create_zip_from_json(json_result)
-            if zip_file:
-                st.success("Project generated successfully! 🎉")
+                # Display structure and run instructions
+                st.subheader("📂 Generated Project Structure")
+                st.json(project_data.get("directories", {}))
+
+                st.subheader("💻 Run Instructions")
+                for step in project_data.get("run_instructions", []):
+                    st.markdown(f"- `{step}`")
+
+                # --- Create ZIP file for download ---
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+                    for folder, files in project_data.get("directories", {}).items():
+                        for filename, content in files.items():
+                            zip_file.writestr(f"{folder}/{filename}", content)
+                zip_buffer.seek(0)
+
                 st.download_button(
-                    label="⬇️ Download Project.zip",
-                    data=open(zip_file, "rb"),
-                    file_name="project.zip",
-                    mime="application/zip"
+                    label="⬇️ Download Project ZIP",
+                    data=zip_buffer,
+                    file_name="generated_webapp.zip",
+                    mime="application/zip",
                 )
+
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
 
 st.divider()
-st.caption("💡 Tip: Choose your language and framework, and AI will generate a ready-to-run project for you.")
+st.caption("💡 Example prompt: 'Generate a Flask + React + MongoDB app for managing notes.'")
